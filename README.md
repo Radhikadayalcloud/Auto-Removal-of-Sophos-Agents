@@ -71,15 +71,4 @@ Create the stack
 
 ---
 
-## Setup
 
-### What you need before starting
-
-| Item | Where to get it |
-|------|----------------|
-| Sophos Client ID | Sophos Central > Global Settings > API Credentials Management > Add Credential |
-| Sophos Client Secret | Same place - shown only once, copy before closing |
-| AWS IAM user credentials | AWS Console > IAM > Users > [user] > Security credentials > Create access key |
-| S3 bucket name | You create this in Step 1 below (must be globally unique) |
-
----
