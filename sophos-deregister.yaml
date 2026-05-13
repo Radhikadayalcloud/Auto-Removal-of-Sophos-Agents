@@ -1,0 +1,512 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Sophos Central endpoint auto-deregistration stack.
+  Automatically removes Sophos endpoint licences when EC2 instances are terminated.
+  Resources: Secrets Manager secret, Lambda function, IAM role, EventBridge rule,
+  and Lambda invoke permission.
+
+# --- Metadata -----------------------------------------------------------------
+# Controls how parameters appear grouped in the AWS CloudFormation Console UI.
+# Navigation: AWS Console > CloudFormation > Create Stack > Specify stack details
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "1. Sophos Central API Credentials"
+        Parameters:
+          - SophosClientId
+          - SophosClientSecret
+          - SophosSecretName
+      - Label:
+          default: "3. Lambda Configuration"
+        Parameters:
+          - LambdaFunctionName
+      - Label:
+          default: "5. EventBridge Configuration"
+        Parameters:
+          - EventBridgeRuleName
+          - EventBridgeRuleState
+    ParameterLabels:
+      SophosClientId:
+        default: "Sophos Client ID"
+      SophosClientSecret:
+        default: "Sophos Client Secret"
+      SophosSecretName:
+        default: "Secrets Manager - Secret Name"
+      LambdaFunctionName:
+        default: "Lambda - Function Name"
+      EventBridgeRuleName:
+        default: "EventBridge - Rule Name"
+      EventBridgeRuleState:
+        default: "EventBridge - Rule State on Deploy"
+
+# --- Parameters ---------------------------------------------------------------
+# Navigation: AWS Console > CloudFormation > Create Stack > Specify stack details
+Parameters:
+
+  # ----------------------------------------------------------------------------
+  # GROUP 1 - SOPHOS CENTRAL API CREDENTIALS
+  # Where to find: Sophos Central > Global Settings > API Credentials Management
+  #   > Add Credential > Role: Service Principal Administrator
+  #   > Copy Client ID and Client Secret (shown only once)
+  # ----------------------------------------------------------------------------
+
+  SophosClientId:
+    Type: String
+    Description: >
+      OAuth2 Client ID from Sophos Central.
+      Navigation: Sophos Central > Global Settings > API Credentials Management > Add Credential.
+      Role must be: Service Principal Administrator.
+    NoEcho: true
+    MinLength: 1
+
+  SophosClientSecret:
+    Type: String
+    Description: >
+      OAuth2 Client Secret from Sophos Central.
+      WARNING: This is shown only once at credential creation. Copy it before closing the dialog.
+    NoEcho: true
+    MinLength: 1
+
+  SophosSecretName:
+    Type: String
+    Default: "sophos/central-api"
+    Description: >
+      Name for the Secrets Manager secret.
+      Navigation (after deploy): AWS Console > Secrets Manager > Secrets > [this name].
+      Use a path format (e.g. sophos/central-api) to group related secrets.
+    AllowedPattern: "[a-zA-Z0-9/_+=.@-]+"
+
+
+  # ----------------------------------------------------------------------------
+  # GROUP 2 - DEPLOYMENT CONFIGURATION
+  # ----------------------------------------------------------------------------
+  # ----------------------------------------------------------------------------
+  # GROUP 3 - LAMBDA CONFIGURATION
+  # Navigation (after deploy): AWS Console > Lambda > Functions > [function name]
+  # ----------------------------------------------------------------------------
+
+  LambdaFunctionName:
+    Type: String
+    Default: "sophos-deregister"
+    Description: >
+      Name of the Lambda function.
+      Navigation (after deploy): AWS Console > Lambda > Functions > [this name].
+      CloudWatch logs: AWS Console > CloudWatch > Log Groups > /aws/lambda/[this name].
+    AllowedPattern: "[a-zA-Z0-9-_]+"
+    MaxLength: 64
+
+
+  # ----------------------------------------------------------------------------
+  # GROUP 4 - EVENTBRIDGE CONFIGURATION
+  # Navigation (after deploy): AWS Console > EventBridge > Rules > [rule name]
+  # ----------------------------------------------------------------------------
+
+  EventBridgeRuleName:
+    Type: String
+    Default: "sophos-ec2-termination"
+    Description: >
+      Name of the EventBridge rule that watches for EC2 termination events.
+      Navigation (after deploy): AWS Console > EventBridge > Rules > [this name].
+      Event pattern: source=aws.ec2, detail-type=EC2 Instance State-change Notification, state=terminated.
+    AllowedPattern: "[a-zA-Z0-9-_.]+"
+    MaxLength: 64
+
+
+  EventBridgeRuleState:
+    Type: String
+    Default: "ENABLED"
+    AllowedValues:
+      - "ENABLED"
+      - "DISABLED"
+    Description: >
+      ENABLED: Rule fires immediately on deployment - recommended for production.
+      DISABLED: Rule is created but inactive - useful for testing before going live.
+      Navigation (after deploy): AWS Console > EventBridge > Rules > [rule name] > Enable/Disable.
+
+# --- Resources ----------------------------------------------------------------
+Resources:
+
+  # -- 1. Secrets Manager ------------------------------------------------------
+  # Navigation: AWS Console > Secrets Manager > Secrets > [SophosSecretName]
+  # Stores Sophos OAuth2 client_id and client_secret as a JSON key-value pair.
+  # The Lambda reads this at runtime via secretsmanager:GetSecretValue.
+  SophosApiSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Ref SophosSecretName
+      Description: "Sophos Central API OAuth2 credentials for EC2 termination automation"
+      SecretString: !Sub |
+        {
+          "client_id": "${SophosClientId}",
+          "client_secret": "${SophosClientSecret}"
+        }
+      Tags:
+        - Key: Project
+          Value: sophos-automation
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # -- 2. IAM Role -------------------------------------------------------------
+  # Navigation: AWS Console > IAM > Roles > [LambdaFunctionName]-execution-role
+  # Role name is derived from LambdaFunctionName: <LambdaFunctionName>-execution-role
+  # Grants Lambda permission to:
+  #   - Read the Sophos secret from Secrets Manager
+  #   - Write execution logs to CloudWatch Logs (via AWSLambdaBasicExecutionRole)
+  SophosLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${LambdaFunctionName}-execution-role"
+      Description: !Sub "Execution role for ${LambdaFunctionName} Lambda - grants Secrets Manager read and CloudWatch Logs write"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SophosSecretsReadOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowSophosSecretRead
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Ref SophosApiSecret
+      Tags:
+        - Key: Project
+          Value: sophos-automation
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # -- 3. Lambda Function -------------------------------------------------------
+  # Navigation: AWS Console > Lambda > Functions > [LambdaFunctionName]
+  # Runtime: python3.14 (latest supported Lambda Python runtime)
+  # Handler: index.lambda_handler (index = filename, lambda_handler = function)
+  # The full Python code is embedded inline under Code > ZipFile.
+  # CloudWatch Logs: AWS Console > CloudWatch > Log Groups > /aws/lambda/[LambdaFunctionName]
+  SophosDeregisterLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Description: "Removes Sophos Central endpoint licence when an EC2 instance is terminated"
+      Runtime: python3.14
+      Handler: index.lambda_handler
+      Role: !GetAtt SophosLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          # Navigation: AWS Console > Lambda > [function] > Configuration > Environment variables
+          SOPHOS_SECRET_NAME: !Ref SophosSecretName
+      Tags:
+        - Key: Project
+          Value: sophos-automation
+        - Key: ManagedBy
+          Value: CloudFormation
+      Code:
+        ZipFile: |
+          """
+          index.py
+          --------
+          Triggered by EventBridge when an EC2 instance is terminated.
+          Searches Sophos Central using the ?cloud=<instance-id> filter,
+          then deletes the endpoint to release the licence seat.
+
+          Environment variables:
+            SOPHOS_SECRET_NAME - name of the Secrets Manager secret (set by CloudFormation)
+          """
+
+          import json
+          import logging
+          import os
+          import urllib.request
+          import urllib.parse
+          import urllib.error
+          import boto3
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          SOPHOS_TOKEN_URL = "https://id.sophos.com/api/v2/oauth2/token"
+          SOPHOS_API_HOST  = "https://api.central.sophos.com"
+          SECRET_NAME      = os.environ.get("SOPHOS_SECRET_NAME", "sophos/central-api")
+
+
+          def get_sophos_credentials():
+              """Read client_id and client_secret from Secrets Manager."""
+              sm     = boto3.client("secretsmanager")
+              resp   = sm.get_secret_value(SecretId=SECRET_NAME)
+              secret = json.loads(resp["SecretString"])
+              return secret["client_id"], secret["client_secret"]
+
+
+          def http_request(method, url, headers=None, data=None, timeout=15):
+              """Generic HTTP helper using Python stdlib only - no extra packages needed."""
+              req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  body = resp.read().decode()
+                  return json.loads(body) if body else {}
+
+
+          def get_sophos_token(client_id, client_secret):
+              """Exchange client credentials for a Sophos bearer token (valid 1 hour)."""
+              payload = urllib.parse.urlencode({
+                  "grant_type":    "client_credentials",
+                  "client_id":     client_id,
+                  "client_secret": client_secret,
+                  "scope":         "token",
+              }).encode()
+              result = http_request(
+                  "POST", SOPHOS_TOKEN_URL,
+                  headers={"Content-Type": "application/x-www-form-urlencoded"},
+                  data=payload,
+              )
+              token = result.get("access_token")
+              if not token:
+                  raise RuntimeError(f"No access_token returned: {result}")
+              logger.info("Obtained Sophos bearer token.")
+              return token
+
+
+          def get_tenant_info(token):
+              """Return (tenant_id, regional_api_host) for the authenticated Sophos account."""
+              result    = http_request(
+                  "GET", f"{SOPHOS_API_HOST}/whoami/v1",
+                  headers={"Authorization": f"Bearer {token}"},
+              )
+              tenant_id = result["id"]
+              api_host  = result["apiHosts"]["dataRegion"]
+              logger.info("Tenant ID: %s  API host: %s", tenant_id, api_host)
+              return tenant_id, api_host
+
+
+          def find_endpoint_by_cloud_instance_id(token, tenant_id, api_host, instance_id):
+              """
+              Search Sophos Central for an endpoint using the ?cloud= query parameter.
+              This uses the AWS instance ID directly from the EventBridge event payload.
+              Works even after the EC2 instance is fully terminated and purged from AWS.
+              """
+              url     = f"{api_host}/endpoint/v1/endpoints"
+              headers = {
+                  "Authorization": f"Bearer {token}",
+                  "X-Tenant-ID":   tenant_id,
+              }
+              qs     = urllib.parse.urlencode({"cloud": instance_id, "pageSize": 10})
+              result = http_request("GET", f"{url}?{qs}", headers=headers)
+              items  = result.get("items", [])
+              if items:
+                  ep = items[0]
+                  logger.info(
+                      "Found endpoint via ?cloud= filter: sophos_id=%s hostname=%s",
+                      ep.get("id"), ep.get("hostname"),
+                  )
+                  return ep
+              logger.warning("No Sophos endpoint found for instance ID: %s", instance_id)
+              return None
+
+
+          def delete_endpoint(token, tenant_id, api_host, endpoint_id):
+              """
+              Delete the endpoint from Sophos Central to release the licence seat.
+              Handles both 200 OK and 204 No Content as successful responses.
+              Note: urllib raises HTTPError for 204 (empty body) - caught explicitly.
+              """
+              url     = f"{api_host}/endpoint/v1/endpoints/{endpoint_id}"
+              headers = {
+                  "Authorization": f"Bearer {token}",
+                  "X-Tenant-ID":   tenant_id,
+              }
+              req = urllib.request.Request(url, headers=headers, method="DELETE")
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      if resp.status in (200, 204):
+                          logger.info("Endpoint %s deleted successfully (status %s).", endpoint_id, resp.status)
+                          return True
+                      logger.warning("Unexpected status %s for endpoint %s.", resp.status, endpoint_id)
+                      return False
+              except urllib.error.HTTPError as e:
+                  if e.code == 204:
+                      # urllib raises HTTPError for 204 No Content (no body)
+                      # This is the expected Sophos DELETE success response
+                      logger.info("Endpoint %s deleted successfully (204 No Content).", endpoint_id)
+                      return True
+                  if e.code == 404:
+                      logger.warning("Endpoint %s not found - may have already been removed.", endpoint_id)
+                      return False
+                  raise
+
+
+          def lambda_handler(event, context):
+              """
+              Main entrypoint called by EventBridge.
+
+              Expected event shape (from EventBridge EC2 State-change):
+              {
+                "source": "aws.ec2",
+                "detail-type": "EC2 Instance State-change Notification",
+                "detail": {
+                  "instance-id": "i-035c6e260f3b3588b",
+                  "state": "terminated"
+                }
+              }
+              """
+              logger.info("Event received: %s", json.dumps(event))
+
+              detail      = event.get("detail", {})
+              instance_id = detail.get("instance-id")
+              state       = detail.get("state")
+
+              if not instance_id:
+                  logger.error("No instance-id in event detail.")
+                  return {"statusCode": 400, "body": "Missing instance-id"}
+
+              if state != "terminated":
+                  logger.info("Skipping - state is '%s', not 'terminated'.", state)
+                  return {"statusCode": 200, "body": f"Skipped state: {state}"}
+
+              logger.info("Processing terminated instance: %s", instance_id)
+
+              client_id, client_secret = get_sophos_credentials()
+              token                    = get_sophos_token(client_id, client_secret)
+              tenant_id, api_host      = get_tenant_info(token)
+
+              endpoint = find_endpoint_by_cloud_instance_id(
+                  token, tenant_id, api_host, instance_id
+              )
+
+              if not endpoint:
+                  logger.warning(
+                      "No Sophos endpoint found for instance %s. "
+                      "Instance may not have had Sophos agent installed.",
+                      instance_id,
+                  )
+                  return {
+                      "statusCode": 200,
+                      "body": f"No Sophos endpoint found for instance {instance_id}",
+                  }
+
+              endpoint_id = endpoint["id"]
+              ep_hostname = endpoint.get("hostname", "unknown")
+              ep_ip       = (endpoint.get("ipv4Addresses") or ["unknown"])[0]
+
+              logger.info(
+                  "Deleting endpoint: sophos_id=%s hostname=%s ip=%s instance=%s",
+                  endpoint_id, ep_hostname, ep_ip, instance_id,
+              )
+
+              deleted = delete_endpoint(token, tenant_id, api_host, endpoint_id)
+
+              if deleted:
+                  return {
+                      "statusCode": 200,
+                      "body": (
+                          f"Endpoint {endpoint_id} ({ep_hostname} / {ep_ip}) "
+                          f"removed from Sophos Central for instance {instance_id}."
+                      ),
+                  }
+              return {
+                  "statusCode": 200,
+                  "body": f"Endpoint {endpoint_id} not found or already removed.",
+              }
+
+  # -- 4. EventBridge Rule ------------------------------------------------------
+  # Navigation: AWS Console > EventBridge > Rules > [EventBridgeRuleName]
+  # Event bus: default (catches all EC2 state-change events in this region)
+  # Pattern: fires only when detail.state = "terminated"
+  EC2TerminationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Ref EventBridgeRuleName
+      Description: "Triggers Sophos deregistration Lambda when an EC2 instance is terminated"
+      State: !Ref EventBridgeRuleState
+      EventPattern:
+        source:
+          - "aws.ec2"
+        detail-type:
+          - "EC2 Instance State-change Notification"
+        detail:
+          state:
+            - "terminated"
+      Targets:
+        - Id: SophosDeregisterLambdaTarget
+          Arn: !GetAtt SophosDeregisterLambda.Arn
+
+  # -- 5. Lambda Permission -----------------------------------------------------
+  # Navigation: AWS Console > Lambda > [LambdaFunctionName] > Configuration > Permissions
+  #             > Resource-based policy statements > View policy document
+  # Grants EventBridge permission to invoke the Lambda function.
+  # Scoped to this specific rule ARN - no other EventBridge rule can invoke it.
+  EventBridgeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SophosDeregisterLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EC2TerminationRule.Arn
+
+# --- Outputs ------------------------------------------------------------------
+# Navigation: AWS Console > CloudFormation > Stacks > [stack name] > Outputs tab
+Outputs:
+
+  LambdaFunctionArn:
+    Description: "ARN of the Sophos deregistration Lambda function"
+    Value: !GetAtt SophosDeregisterLambda.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaArn"
+
+  LambdaFunctionName:
+    Description: "Lambda function name - navigate to: AWS Console > Lambda > Functions > [this name]"
+    Value: !Ref SophosDeregisterLambda
+
+  LambdaCloudWatchLogs:
+    Description: "CloudWatch log group for Lambda - navigate to: AWS Console > CloudWatch > Log Groups > [this path]"
+    Value: !Sub "/aws/lambda/${LambdaFunctionName}"
+
+  EventBridgeRuleArn:
+    Description: "ARN of the EventBridge rule"
+    Value: !GetAtt EC2TerminationRule.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-EventBridgeRuleArn"
+
+  EventBridgeRuleName:
+    Description: "EventBridge rule name - navigate to: AWS Console > EventBridge > Rules > [this name]"
+    Value: !Ref EventBridgeRuleName
+
+  SecretsManagerArn:
+    Description: "ARN of the Secrets Manager secret - navigate to: AWS Console > Secrets Manager > Secrets > [secret name]"
+    Value: !Ref SophosApiSecret
+    Export:
+      Name: !Sub "${AWS::StackName}-SecretArn"
+
+  SecretsManagerName:
+    Description: "Secrets Manager secret name"
+    Value: !Ref SophosSecretName
+
+  IAMRoleArn:
+    Description: "Lambda IAM execution role ARN - navigate to: AWS Console > IAM > Roles > [role name]"
+    Value: !GetAtt SophosLambdaRole.Arn
+
+  IAMRoleName:
+    Description: "Lambda IAM execution role name (derived from LambdaFunctionName)"
+    Value: !Sub "${LambdaFunctionName}-execution-role"
+
+
+  CLIDeployCommand:
+    Description: "CLI command to redeploy this stack"
+    Value: !Sub >
+      aws cloudformation deploy
+      --template-file sophos-deregister.yaml
+      --stack-name ${AWS::StackName}
+      --capabilities CAPABILITY_NAMED_IAM
+      --region YOUR_REGION
+      --parameter-overrides
+      SophosClientId=YOUR_ID
+      SophosClientSecret=YOUR_SECRET
+      LambdaFunctionName=${LambdaFunctionName}
+      EventBridgeRuleName=${EventBridgeRuleName}
