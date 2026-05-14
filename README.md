@@ -2,7 +2,7 @@
 
 Automatically removes Sophos Central endpoint licences when AWS EC2 instances
 are terminated. No manual cleanup needed.
-
+Please Note: Instances terminated before running the code do not automatically remove the Sophos Central endpoint.
 ## How it works
 
 ```
