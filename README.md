@@ -31,12 +31,17 @@ save the client ID and Client secret
 Download the sophos-deregister.yaml from GitHub and upload the file here
 4) Fill in the parameters as below
 
-a)Sophos Client ID : Paste the Sophos Central API key ID
-b)Sophos Client Secret: Paste the Sophos Central API client secret
-c)Secret Manager-Secret Name : Change the name as the default one most likely exists in Sophos NSG IAAS playground
-d)Lambda - Function Name:Provide suitable name/leave the default one  
-e)EventBridge - Rule Name:Provide suitable name/leave the default one
-f)EventBridge - Rule State on Deploy : ENABLED
+a)Sophos Client ID : Paste the Sophos Central API key ID.
+
+b)Sophos Client Secret: Paste the Sophos Central API client secret.
+
+c)Secret Manager-Secret Name : Change the name as the default one most likely exists in Sophos NSG IAAS playground.
+
+d)Lambda - Function Name:Provide suitable name/leave the default one.
+
+e)EventBridge - Rule Name:Provide suitable name/leave the default one.
+
+f)EventBridge - Rule State on Deploy : ENABLED.
 
 Create the stack 
 
