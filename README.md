@@ -69,7 +69,6 @@ Create the stack
 | `SophosClientId` | Yes | - | OAuth2 Client ID from Sophos Central |
 | `SophosClientSecret` | Yes | - | OAuth2 Client Secret from Sophos Central |
 | `SophosSecretName` | No | `sophos/central-api` | Secrets Manager secret name |
-| `DeploymentRegion` | No | `ap-south-1` | AWS region (19 regions available in dropdown) |
 | `LambdaFunctionName` | No | `sophos-deregister` | Lambda function name |
 | `EventBridgeRuleName` | No | `sophos-ec2-termination` | EventBridge rule name |
 | `EventBridgeRuleState` | No | `ENABLED` | ENABLED fires immediately, DISABLED requires manual activation |
